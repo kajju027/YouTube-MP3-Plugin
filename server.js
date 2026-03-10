@@ -1,82 +1,52 @@
-const express = require("express")
-const yts = require("yt-search")
-const ytdl = require("ytdl-core")
+const express = require("express");
+const yts = require("yt-search");
+const { exec } = require("child_process");
 
-const app = express()
+const app = express();
 
-app.get("/", (req,res)=>{
-res.json({
-name:"Sayan Music API",
-status:"running"
-})
-})
+app.get("/", (req, res) => {
+  res.send("Sayan Music API Running");
+});
 
-app.get("/music", async (req,res)=>{
+app.get("/music", async (req, res) => {
+  const query = req.query.song;
+  if (!query) {
+    return res.json({ status: false, message: "Song name required" });
+  }
 
-const query = req.query.song
+  try {
+    const search = await yts(query);
+    const video = search.videos[0];
 
-if(!query){
-return res.json({
-status:false,
-message:"Please provide song name"
-})
-}
+    res.json({
+      status: true,
+      result: {
+        title: video.title,
+        duration: video.timestamp,
+        views: video.views,
+        thumbnail: video.thumbnail,
+        audio: `/audio?id=${video.videoId}`
+      }
+    });
 
-try{
+  } catch (e) {
+    res.json({ status: false, message: "Search error" });
+  }
+});
 
-const search = await yts(query)
-const video = search.videos[0]
+app.get("/audio", (req, res) => {
+  const id = req.query.id;
+  if (!id) return res.send("No video id");
 
-if(!video){
-return res.json({
-status:false,
-message:"Song not found"
-})
-}
+  const url = `https://youtube.com/watch?v=${id}`;
 
-res.json({
-status:true,
-result:{
-title:video.title,
-duration:video.timestamp,
-views:video.views,
-thumbnail:video.thumbnail,
-download_url:`/audio?id=${video.videoId}`
-}
-})
+  exec(`yt-dlp -f bestaudio -g ${url}`, (err, stdout) => {
+    if (err) return res.send("Audio error");
 
-}catch(e){
+    const audioUrl = stdout.trim();
+    res.redirect(audioUrl);
+  });
+});
 
-res.json({
-status:false,
-message:"API error"
-})
-
-}
-
-})
-
-app.get("/audio",(req,res)=>{
-
-const id = req.query.id
-
-if(!id){
-return res.send("No video id")
-}
-
-const url = `https://youtube.com/watch?v=${id}`
-
-res.setHeader("Content-Type","audio/mpeg")
-
-ytdl(url,{
-filter:"audioonly",
-quality:"highestaudio"
-}).pipe(res)
-
-})
-
-const PORT = process.env.PORT || 3000
-
-app.listen(PORT,()=>{
-console.log("Server running")
-})
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log("Server running"));
