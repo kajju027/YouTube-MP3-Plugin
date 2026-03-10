@@ -5,17 +5,15 @@ const { exec } = require("child_process");
 const app = express();
 
 app.get("/", (req, res) => {
-  res.send("Sayan Music API Running");
+  res.json({ status: "Sayan Music API Running" });
 });
 
 app.get("/music", async (req, res) => {
-  const query = req.query.song;
-  if (!query) {
-    return res.json({ status: false, message: "Song name required" });
-  }
+  const song = req.query.song;
+  if (!song) return res.json({ status: false });
 
   try {
-    const search = await yts(query);
+    const search = await yts(song);
     const video = search.videos[0];
 
     res.json({
@@ -28,23 +26,20 @@ app.get("/music", async (req, res) => {
         audio: `/audio?id=${video.videoId}`
       }
     });
-
-  } catch (e) {
-    res.json({ status: false, message: "Search error" });
+  } catch {
+    res.json({ status: false });
   }
 });
 
 app.get("/audio", (req, res) => {
   const id = req.query.id;
-  if (!id) return res.send("No video id");
-
   const url = `https://youtube.com/watch?v=${id}`;
 
   exec(`yt-dlp -f bestaudio -g ${url}`, (err, stdout) => {
     if (err) return res.send("Audio error");
 
-    const audioUrl = stdout.trim();
-    res.redirect(audioUrl);
+    const audio = stdout.trim();
+    res.redirect(audio);
   });
 });
 
