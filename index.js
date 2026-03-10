@@ -1,91 +1,111 @@
-const express = require('express');
-const cors = require('cors');
-const yts = require('yt-search');
-const ytdl = require('@distube/ytdl-core');
+const JSON_URL = "https://raw.githubusercontent.com/Jitendra-unatti/fancode/refs/heads/main/data/fancode.json";
 
-const app = express();
-const PORT = process.env.PORT || 3000;
+export async function onRequest(context) {
+  const req = context.request;
+  const url = new URL(req.url);
 
-// Middleware
-app.use(cors());
-app.use(express.json());
+  // CORS Headers
+  const corsHeaders = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
+    "Access-Control-Allow-Headers": "*",
+  };
 
-// হোম রুট (চেক করার জন্য)
-app.get('/', (req, res) => {
-    res.send('Music API is Running Successfully!');
-});
+  if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
-// সার্চ এবং ডাউনলোড লিংক পাওয়ার এন্ডপয়েন্ট
-app.get('/search', async (req, res) => {
-    const query = req.query.q;
+  const pathname = url.pathname.replace("/api", "");
 
-    if (!query) {
-        return res.status(400).json({ error: 'Please provide a song name (?q=...)' });
+  // Proxy Logic
+  if (pathname === "/proxy") {
+    const target = url.searchParams.get("u");
+    if (!target) return new Response("Missing URL", { status: 400, headers: corsHeaders });
+
+    // হেডার প্রিপেয়ার করা
+    const requestHeaders = new Headers({
+      "User-Agent": "Mozilla/5.0 (Linux; Android 10) Chrome/120.0.0.0 Mobile",
+      "Referer": "https://fancode.com/"
+    });
+    
+    // Range রিকুয়েস্ট সাপোর্ট (প্লেয়ারের জন্য জরুরি)
+    if (req.headers.get("Range")) {
+      requestHeaders.set("Range", req.headers.get("Range"));
     }
+
+    const res = await fetch(target, { headers: requestHeaders });
+    const ct = res.headers.get("content-type") || "";
+    
+    // যদি m3u8 হয় (মাস্টার বা মিডিয়া প্লেলিস্ট)
+    if (ct.includes("mpegurl") || target.endsWith(".m3u8")) {
+      let text = await res.text();
+      const base = new URL(target);
+      
+      // লাইভ স্ট্রিমের জন্য লিংক রি-রাইট
+      text = text.split("\n").map(l => {
+        if (!l || l.startsWith("#")) return l;
+        const absUrl = new URL(l.trim(), base).href;
+        return `/api/proxy?u=${encodeURIComponent(absUrl)}`;
+      }).join("\n");
+
+      // এখানেই মূল ফিক্স: ক্যাশে বন্ধ করা হচ্ছে যাতে লাইভ ভিডিও আটকে না যায়
+      const headers = new Headers(corsHeaders);
+      headers.set("Content-Type", "application/vnd.apple.mpegurl");
+      headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
+      
+      return new Response(text, { headers });
+    }
+
+    // ভিডিও সেগমেন্ট (.ts) রিটার্ন করা
+    // এখানে আগের রেসপন্সের হেডারের সাথে CORS যোগ করা হচ্ছে
+    const newHeaders = new Headers(res.headers);
+    Object.keys(corsHeaders).forEach(key => newHeaders.set(key, corsHeaders[key]));
+
+    return new Response(res.body, { 
+      headers: newHeaders, 
+      status: res.status, 
+      statusText: res.statusText 
+    });
+  }
+
+  // Match Logic
+  const match = pathname.match(/^\/(\d+)_([^\/]+)_sayan\.m3u8$/);
+  if (match) {
+    const id = match[1];
+    const lang = match[2].toLowerCase();
 
     try {
-        // 1. ইউটিউবে গান সার্চ করা
-        const searchResult = await yts(query);
-        const firstVideo = searchResult.videos[0];
+      const data = await (await fetch(JSON_URL)).json();
+      const game = data.matches.find(m => String(m.match_id) === id && String(m.language).toLowerCase() === lang);
+      
+      if (!game) return new Response("Match Not Found", { status: 404, headers: corsHeaders });
 
-        if (!firstVideo) {
-            return res.status(404).json({ error: 'No song found!' });
-        }
+      let src = game.auto_streams?.[0]?.auto;
+      if(!src) return new Response("Source missing", { status: 404, headers: corsHeaders });
 
-        // 2. গানের তথ্য এবং অডিও লিংক তৈরি করা
-        // আমরা সরাসরি ডাউনলোড লিংক জেনারেট করব
-        const videoUrl = firstVideo.url;
-        
-        // অডিও স্ট্রিম থেকে ইনফো নেওয়া
-        const info = await ytdl.getInfo(videoUrl);
-        
-        // শুধুমাত্র অডিও ফরম্যাট ফিল্টার করা (MP3/OPUS)
-        const audioFormats = ytdl.filterFormats(info.formats, 'audioonly');
-        
-        // সেরা কোয়ালিটির অডিও লিংক বেছে নেওয়া
-        const bestAudio = audioFormats.length > 0 ? audioFormats[0] : null;
+      let content = src;
+      let base = "https://fancode.com/";
 
-        if (!bestAudio) {
-            return res.status(404).json({ error: 'Audio format not found!' });
-        }
+      if (src && src.startsWith("http")) {
+        const r = await fetch(src, { headers: { "Referer": "https://fancode.com/" }});
+        content = await r.text();
+        base = src;
+      }
+      
+      content = content.split("\n").map(l => {
+        if (!l || l.startsWith("#")) return l;
+        const absUrl = new URL(l.trim(), base).href;
+        return `/api/proxy?u=${encodeURIComponent(absUrl)}`;
+      }).join("\n");
 
-        // 3. JSON রেসপন্স তৈরি করা
-        const responseData = {
-            title: firstVideo.title,
-            duration: firstVideo.duration.timestamp,
-            thumbnail: firstVideo.thumbnail,
-            uploader: firstVideo.author.name,
-            // এই লিংকটি সরাসরি MP3 স্ট্রিম করবে
-            audio_url: bestAudio.url, 
-            // সরাসরি ডাউনলোডের জন্য একটি এন্ডপয়েন্ট
-            download_endpoint: `/download?url=${firstVideo.id}`
-        };
+      // এখানেও ক্যাশে বন্ধ করা হচ্ছে
+      const headers = new Headers(corsHeaders);
+      headers.set("Content-Type", "application/vnd.apple.mpegurl");
+      headers.set("Cache-Control", "no-store, no-cache, must-revalidate");
 
-        res.json(responseData);
-
-    } catch (error) {
-        console.error(error);
-        res.status(500).json({ error: 'Something went wrong on the server.' });
+      return new Response(content, { headers });
+    } catch (e) {
+      return new Response("Error: " + e.message, { status: 500, headers: corsHeaders });
     }
-});
+  }
 
-// অপশনাল: সরাসরি ফাইল ডাউনলোড এন্ডপয়েন্ট (বটের জন্য সুবিধাজনক)
-app.get('/download', async (req, res) => {
-    const videoId = req.query.url;
-    if (!videoId) return res.status(400).send('Video ID required');
-
-    try {
-        const url = `https://www.youtube.com/watch?v=${videoId}`;
-        // হেডার সেট করা যাতে ব্রাউজার বা বট এটি ফাইল হিসেবে ডাউনলোড করে
-        res.header('Content-Disposition', `attachment; filename="music_${videoId}.mp3"`);
-        
-        // স্ট্রিমিং শুরু
-        ytdl(url, { filter: 'audioonly', quality: 'highestaudio' }).pipe(res);
-    } catch (err) {
-        res.status(500).send('Download failed');
-    }
-});
-
-app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
+  return new Response("Use format: /api/ID_LANG_sayan.m3u8", { headers: corsHeaders });
+}
